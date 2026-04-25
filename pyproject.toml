@@ -49,6 +49,7 @@ dependencies = [
     "python-xlib; sys_platform == 'linux'",
     "PyGObject; sys_platform == 'linux'",
     "psutil>=5.9.0",
+    "onnxruntime>=1.16.0",
 ]
 
 [project.optional-dependencies]
@@ -56,9 +57,6 @@ whisper = [
     "openai-whisper>=20231117",
     "torch>=2.0.0",
     "torchaudio>=2.0.0",
-]
-vad = [
-    "onnxruntime>=1.16.0",
 ]
 dev = [
     "pytest>=7.0.0",

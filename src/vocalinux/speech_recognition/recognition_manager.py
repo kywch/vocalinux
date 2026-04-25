@@ -1692,6 +1692,7 @@ class SpeechRecognitionManager:
             # Record audio while should_record is True
             silence_counter = 0
             speech_detected_in_session = False
+            speech_detected_in_segment = False
             log_level_interval = 0  # Counter for periodic level logging
             max_level_seen = 0.0
             # Accumulator for 512-sample Silero chunks.  When the capture rate
@@ -1810,10 +1811,17 @@ class SpeechRecognitionManager:
                     if not is_speech:  # Silence
                         silence_counter += CHUNK / RATE  # Convert chunks to seconds
                         if silence_counter > self.silence_timeout:
-                            if len(self.audio_buffer) > 0:
+                            if len(self.audio_buffer) > 0 and speech_detected_in_segment:
                                 logger.debug("Silence detected, queueing audio segment")
                                 self._enqueue_audio_segment(self.audio_buffer)
-                                self.audio_buffer = []
+                            elif len(self.audio_buffer) > 0:
+                                logger.debug(
+                                    "Silence timeout with no speech in segment, "
+                                    "dropping %d chunks (avoids Whisper hallucinations)",
+                                    len(self.audio_buffer),
+                                )
+                            self.audio_buffer = []
+                            speech_detected_in_segment = False
                             silence_counter = 0
                     else:  # Speech
                         if not speech_detected_in_session:
@@ -1828,6 +1836,7 @@ class SpeechRecognitionManager:
                                     f"threshold={500 / max(1, min(5, int(self.vad_sensitivity))):.0f})"
                                 )
                             speech_detected_in_session = True
+                        speech_detected_in_segment = True
                         silence_counter = 0
                 except (IOError, OSError) as e:
                     current_time = time.time()
