@@ -49,6 +49,7 @@ dependencies = [
     "python-xlib; sys_platform == 'linux'",
     "PyGObject; sys_platform == 'linux'",
     "psutil>=5.9.0",
+    "onnxruntime>=1.16.0",
 ]
 
 [project.optional-dependencies]
@@ -94,7 +95,7 @@ package-dir = {"" = "src"}
 version = {attr = "vocalinux.version.__version__"}
 
 [tool.setuptools.package-data]
-"*" = ["*.svg", "*.wav"]
+"*" = ["*.svg", "*.wav", "*.onnx"]
 "vocalinux" = ["resources/**/*"]
 
 [tool.black]
