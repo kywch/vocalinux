@@ -422,6 +422,10 @@ class TextInjector:
             logger.debug("Empty text provided, skipping injection")
             return True
 
+        # Append trailing space so consecutive dictations don't run together
+        if not text.endswith(" "):
+            text = text + " "
+
         logger.info(f"Starting text injection: '{text}' (length: {len(text)})")
         logger.debug(f"Environment: {self.environment}")
 

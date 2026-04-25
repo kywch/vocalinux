@@ -781,7 +781,8 @@ class SpeechRecognitionManager:
                     task="transcribe",
                     verbose=False,
                     temperature=0.0,  # Greedy decoding for consistency
-                    no_speech_threshold=0.6,
+                    no_speech_threshold=0.8,
+                    condition_on_previous_text=False,
                     fp16=use_fp16,  # Explicitly set to avoid warning on CPU
                 )
 
@@ -893,7 +894,7 @@ class SpeechRecognitionManager:
                 model_path,
                 n_threads=n_threads,
                 suppress_blank=True,
-                no_speech_thold=0.6,
+                no_speech_thold=0.8,
                 entropy_thold=2.4,
             )
         except RuntimeError as model_error:
@@ -950,7 +951,7 @@ class SpeechRecognitionManager:
             model_path,
             n_threads=n_threads,
             suppress_blank=True,
-            no_speech_thold=0.6,
+            no_speech_thold=0.8,
             entropy_thold=2.4,
         )
         logger.info("Successfully loaded model with CPU backend")
