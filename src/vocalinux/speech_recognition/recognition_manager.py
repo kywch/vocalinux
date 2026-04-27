@@ -546,6 +546,45 @@ def _filter_non_speech(text: str) -> str:
     return text
 
 
+def _normalize_transcript_phrase(text: str) -> str:
+    """Normalize transcript text for conservative phrase matching."""
+    import re
+
+    return re.sub(r"[^a-z0-9]+", " ", text.casefold()).strip()
+
+
+def _should_suppress_low_confidence_hallucination(text: str, probability) -> bool:
+    """
+    Suppress a small set of common Whisper courtesy-phrase hallucinations.
+
+    We keep this intentionally narrow: only short phrases that frequently
+    appear out of silence/noise, and only when whisper.cpp reports weak
+    segment confidence. This avoids suppressing legitimate speech such as a
+    clearly spoken "thank you".
+    """
+    import math
+
+    if probability is None:
+        return False
+
+    try:
+        probability = float(probability)
+    except (TypeError, ValueError):
+        return False
+
+    if math.isnan(probability) or probability >= 0.35:
+        return False
+
+    normalized = _normalize_transcript_phrase(text)
+    hallucination_phrases = {
+        "thank you",
+        "thanks",
+        "thanks for watching",
+        "thank you for watching",
+    }
+    return normalized in hallucination_phrases
+
+
 def _show_notification(title: str, message: str, icon: str = "dialog-warning"):
     """Show a desktop notification."""
     try:
@@ -1018,6 +1057,7 @@ class SpeechRecognitionManager:
                 model_path,
                 n_threads=n_threads,
                 suppress_blank=True,
+                suppress_non_speech_tokens=True,
                 no_speech_thold=0.8,
                 entropy_thold=2.4,
             )
@@ -1075,6 +1115,7 @@ class SpeechRecognitionManager:
             model_path,
             n_threads=n_threads,
             suppress_blank=True,
+            suppress_non_speech_tokens=True,
             no_speech_thold=0.8,
             entropy_thold=2.4,
         )
@@ -1132,7 +1173,11 @@ class SpeechRecognitionManager:
                 # Transcribe with whisper.cpp
                 # pywhispercpp expects audio as numpy array
                 transcribe_start = time.time()
-                segments = self.model.transcribe(audio_float, language=lang)
+                segments = self.model.transcribe(
+                    audio_float,
+                    language=lang,
+                    extract_probability=True,
+                )
                 transcribe_duration = time.time() - transcribe_start
 
             # Extract text from segments, filtering non-speech tokens
@@ -1141,6 +1186,17 @@ class SpeechRecognitionManager:
                 if hasattr(segment, "text") and segment.text:
                     filtered_text = _filter_non_speech(segment.text.strip())
                     if filtered_text:
+                        segment_probability = getattr(segment, "probability", None)
+                        if _should_suppress_low_confidence_hallucination(
+                            filtered_text, segment_probability
+                        ):
+                            logger.info(
+                                "Suppressed likely whisper.cpp hallucination: '%s' "
+                                "(segment_probability=%.3f)",
+                                filtered_text,
+                                float(segment_probability),
+                            )
+                            continue
                         text_parts.append(filtered_text)
 
             text = " ".join(text_parts).strip()

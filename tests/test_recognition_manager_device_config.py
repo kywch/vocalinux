@@ -28,6 +28,7 @@ from vocalinux.common_types import RecognitionState
 from vocalinux.speech_recognition.recognition_manager import (
     SpeechRecognitionManager,
     _filter_non_speech,
+    _should_suppress_low_confidence_hallucination,
     _resolve_input_device,
     _get_supported_channels,
     _get_supported_sample_rate,
@@ -310,6 +311,14 @@ class TestFilterNonSpeech(unittest.TestCase):
         """Test filtering mixed content."""
         result = _filter_non_speech("hello [BLANK_AUDIO] world")
         assert "hello" in result or result == ""
+
+    def test_low_confidence_hallucination_detection(self):
+        """Test suppression of low-confidence courtesy-phrase hallucinations."""
+        assert _should_suppress_low_confidence_hallucination("thank you", 0.2) is True
+        assert _should_suppress_low_confidence_hallucination("thank you", 0.8) is False
+        assert (
+            _should_suppress_low_confidence_hallucination("hello world", 0.2) is False
+        )
 
 
 class TestVoskInitialization(unittest.TestCase):
@@ -670,6 +679,29 @@ class TestTranscription(unittest.TestCase):
         with patch.dict("sys.modules", {"numpy": mock_np, "np": mock_np}):
             result = manager._transcribe_with_whispercpp(audio_buffer)
             assert result == "test result"
+
+    def test_transcribe_with_whispercpp_suppresses_low_confidence_thank_you(self):
+        """Test whisper.cpp suppression of low-confidence courtesy hallucinations."""
+        manager = _make_manager(engine="whisper_cpp")
+
+        mock_segment = MagicMock()
+        mock_segment.text = "thank you"
+        mock_segment.probability = 0.2
+
+        mock_model = MagicMock()
+        mock_model.transcribe.return_value = [mock_segment]
+        manager.model = mock_model
+        manager.language = "en-us"
+
+        audio_buffer = [b"\x00\x00\x00\x00" * 16000]
+
+        mock_np = MagicMock()
+        mock_np.frombuffer.return_value = MagicMock()
+        mock_np.frombuffer.return_value.astype.return_value = MagicMock()
+
+        with patch.dict("sys.modules", {"numpy": mock_np, "np": mock_np}):
+            result = manager._transcribe_with_whispercpp(audio_buffer)
+            assert result == ""
 
 
 class TestStartStopRecognition(unittest.TestCase):
