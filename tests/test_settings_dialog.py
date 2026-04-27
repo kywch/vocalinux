@@ -358,5 +358,35 @@ class TestSettingsDialogHelperFunctions(unittest.TestCase):
         self.assertTrue(callable(_get_recommended_vosk_model))
 
 
+class TestSettingsDialogAudioDevices(unittest.TestCase):
+    """Test audio device selection behavior."""
+
+    def setUp(self):
+        """Set up test fixtures."""
+        if "vocalinux.ui.settings_dialog" in sys.modules:
+            del sys.modules["vocalinux.ui.settings_dialog"]
+
+    def test_populate_audio_devices_clears_stale_saved_device(self):
+        """Test stale saved devices are reset to system default in source."""
+        import os
+
+        source_path = os.path.join(
+            os.path.dirname(__file__),
+            "..",
+            "src",
+            "vocalinux",
+            "ui",
+            "settings_dialog.py",
+        )
+        with open(source_path, "r") as f:
+            source_code = f.read()
+
+        self.assertIn('self.config_manager.set("audio", "device_index", None)', source_code)
+        self.assertIn('self.config_manager.set("audio", "device_name", None)', source_code)
+        self.assertIn("self.config_manager.save_settings()", source_code)
+        self.assertIn("self.speech_engine.set_audio_device(None, None)", source_code)
+        self.assertIn("self.speech_engine.set_audio_device(new_index, new_name)", source_code)
+
+
 if __name__ == "__main__":
     unittest.main()

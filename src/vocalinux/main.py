@@ -349,6 +349,29 @@ def main():
     silence_timeout = saved_settings.get("silence_timeout", 2.0)
     voice_commands_enabled = saved_settings.get("voice_commands_enabled")  # None = auto
     audio_device_index = audio_settings.get("device_index", None)
+    audio_device_name = audio_settings.get("device_name", None)
+
+    if audio_device_index is not None or audio_device_name is not None:
+        resolved_audio_device_index, resolved_audio_device_name = (
+            recognition_manager.resolve_audio_device_selection(
+                audio_device_index, audio_device_name
+            )
+        )
+
+        if (
+            resolved_audio_device_index != audio_device_index
+            or resolved_audio_device_name != audio_device_name
+        ):
+            logger.info(
+                "Updated saved audio device selection at startup: "
+                f"index={audio_device_index}, name={audio_device_name} -> "
+                f"index={resolved_audio_device_index}, name={resolved_audio_device_name}"
+            )
+            config_manager.set("audio", "device_index", resolved_audio_device_index)
+            config_manager.set("audio", "device_name", resolved_audio_device_name)
+            config_manager.save_settings()
+            audio_device_index = resolved_audio_device_index
+            audio_device_name = resolved_audio_device_name
 
     logger.info(f"Final settings: engine={engine}, language={language}, model={model_size}")
     if audio_device_index is not None:
@@ -367,6 +390,7 @@ def main():
             silence_timeout=silence_timeout,
             voice_commands_enabled=voice_commands_enabled,
             audio_device_index=audio_device_index,
+            audio_device_name=audio_device_name,
         )
 
         # Initialize text injection system

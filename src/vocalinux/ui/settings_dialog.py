@@ -18,7 +18,7 @@ import logging
 import os
 import threading
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 import gi
 
@@ -81,6 +81,17 @@ WHISPER_MODEL_INFO = {
     "medium": {"size_mb": 1500, "desc": "High accuracy, slower", "params": "769M"},
     "large": {"size_mb": 2900, "desc": "Highest accuracy, slowest", "params": "1550M"},
 }
+
+
+def _normalize_audio_device_name(name: Optional[str]) -> str:
+    """Normalize a device name for stable comparisons and config storage."""
+    if not name:
+        return ""
+
+    normalized = " ".join(str(name).strip().split())
+    if normalized.endswith(" (default)"):
+        normalized = normalized[: -len(" (default)")].rstrip()
+    return normalized
 
 
 def get_available_engines():
@@ -2210,13 +2221,38 @@ For now, the engine has been reverted to VOSK."""
             self.audio_device_combo.append(str(device_index), label)
 
         saved_device = self.config_manager.get_optional_int("audio", "device_index", None)
+        saved_device_name = self.config_manager.get("audio", "device_name", None)
 
         if saved_device is None:
             self.audio_device_combo.set_active_id("-1")
         else:
             if not self.audio_device_combo.set_active_id(str(saved_device)):
-                logger.warning(f"Saved audio device {saved_device} no longer available")
-                self.audio_device_combo.set_active_id("-1")
+                matched_device = None
+                normalized_saved_name = _normalize_audio_device_name(saved_device_name)
+
+                if normalized_saved_name:
+                    for device_index, device_name, _ in devices:
+                        if _normalize_audio_device_name(device_name) == normalized_saved_name:
+                            matched_device = (device_index, device_name)
+                            break
+
+                if matched_device is not None:
+                    new_index, new_name = matched_device
+                    logger.info(
+                        f"Recovered saved audio device '{saved_device_name}' at new index {new_index}"
+                    )
+                    self.audio_device_combo.set_active_id(str(new_index))
+                    self.config_manager.set("audio", "device_index", new_index)
+                    self.config_manager.set("audio", "device_name", new_name)
+                    self.config_manager.save_settings()
+                    self.speech_engine.set_audio_device(new_index, new_name)
+                else:
+                    logger.warning(f"Saved audio device {saved_device} no longer available")
+                    self.audio_device_combo.set_active_id("-1")
+                    self.config_manager.set("audio", "device_index", None)
+                    self.config_manager.set("audio", "device_name", None)
+                    self.config_manager.save_settings()
+                    self.speech_engine.set_audio_device(None, None)
 
         logger.info(f"Found {len(devices)} audio input devices")
 
@@ -2235,7 +2271,7 @@ For now, the engine has been reverted to VOSK."""
             return
 
         device_index = int(device_id)
-        device_name = self.audio_device_combo.get_active_text()
+        device_name = _normalize_audio_device_name(self.audio_device_combo.get_active_text())
 
         if device_index == -1:
             self.config_manager.set("audio", "device_index", None)
@@ -2247,9 +2283,9 @@ For now, the engine has been reverted to VOSK."""
         self.config_manager.save_settings()
 
         if device_index == -1:
-            self.speech_engine.set_audio_device(None)
+            self.speech_engine.set_audio_device(None, None)
         else:
-            self.speech_engine.set_audio_device(device_index)
+            self.speech_engine.set_audio_device(device_index, device_name)
 
         logger.info(f"Audio device changed to: [{device_index}] {device_name}")
         self.audio_test_status.set_markup(f"<i>Selected: {device_name}</i>")

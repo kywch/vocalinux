@@ -28,9 +28,11 @@ from vocalinux.common_types import RecognitionState
 from vocalinux.speech_recognition.recognition_manager import (
     SpeechRecognitionManager,
     _filter_non_speech,
+    _resolve_input_device,
     _get_supported_channels,
     _get_supported_sample_rate,
     get_audio_input_devices,
+    resolve_audio_device_selection,
 )
 
 
@@ -46,6 +48,86 @@ def _make_manager(engine="whisper_cpp", **kw):
 
 class TestAudioDeviceDetection(unittest.TestCase):
     """Test audio device enumeration functions."""
+
+    def test_resolve_input_device_none_uses_default(self):
+        """Test that None keeps using the system default device."""
+        mock_audio = MagicMock()
+
+        device_index, device_name = _resolve_input_device(mock_audio, None)
+
+        assert device_index is None
+        assert device_name is None
+        mock_audio.get_device_info_by_index.assert_not_called()
+
+    def test_resolve_input_device_missing_device_falls_back(self):
+        """Test fallback when the configured device index no longer exists."""
+        mock_audio = MagicMock()
+        mock_audio.get_device_info_by_index.side_effect = OSError("No such device")
+
+        device_index, device_name = _resolve_input_device(mock_audio, 19)
+
+        assert device_index is None
+        assert device_name is None
+
+    def test_resolve_input_device_output_only_device_falls_back(self):
+        """Test fallback when the configured device has no input channels."""
+        mock_audio = MagicMock()
+        mock_audio.get_device_info_by_index.return_value = {
+            "name": "paplay",
+            "maxInputChannels": 0,
+        }
+
+        device_index, device_name = _resolve_input_device(mock_audio, 19)
+
+        assert device_index is None
+        assert device_name is None
+
+    def test_resolve_input_device_valid_input_device_is_kept(self):
+        """Test that a valid input device index is preserved."""
+        mock_audio = MagicMock()
+        mock_audio.get_device_info_by_index.return_value = {
+            "name": "USB Microphone",
+            "maxInputChannels": 1,
+        }
+
+        device_index, device_name = _resolve_input_device(mock_audio, 4)
+
+        assert device_index == 4
+        assert device_name == "USB Microphone"
+
+    def test_resolve_input_device_recovers_when_index_points_to_different_name(self):
+        """Test recovery when a saved index now maps to a different device."""
+        mock_audio = MagicMock()
+        mock_audio.get_device_count.return_value = 3
+        devices = {
+            0: {"name": "paplay", "maxInputChannels": 1},
+            1: {"name": "Built-in Audio", "maxInputChannels": 1},
+            2: {"name": "Avantalk Lingo", "maxInputChannels": 1},
+        }
+        mock_audio.get_device_info_by_index.side_effect = lambda index: devices[index]
+
+        device_index, device_name = _resolve_input_device(mock_audio, 0, "Avantalk Lingo")
+
+        assert device_index == 2
+        assert device_name == "Avantalk Lingo"
+
+    def test_resolve_audio_device_selection_uses_live_portaudio(self):
+        """Test startup resolver delegates to live PortAudio probing."""
+        mock_audio = MagicMock()
+        mock_audio.get_device_count.return_value = 1
+        mock_audio.get_device_info_by_index.return_value = {
+            "name": "USB Microphone",
+            "maxInputChannels": 1,
+        }
+        mock_pyaudio = MagicMock()
+        mock_pyaudio.PyAudio.return_value = mock_audio
+
+        with patch.dict("sys.modules", {"pyaudio": mock_pyaudio}):
+            device_index, device_name = resolve_audio_device_selection(4, "USB Microphone")
+
+        assert device_index == 4
+        assert device_name == "USB Microphone"
+        mock_audio.terminate.assert_called_once()
 
     def test_get_supported_channels_mono_success(self):
         """Test mono channel support detection."""

@@ -220,6 +220,7 @@ class TestMainModule(unittest.TestCase):
                 vad_sensitivity=3,
                 silence_timeout=2.0,
                 audio_device_index=None,
+                audio_device_name=None,
                 voice_commands_enabled=None,
             )
             mock_text.assert_called_once_with(wayland_mode=True)
@@ -647,6 +648,74 @@ class TestMainConfigPrecedence(unittest.TestCase):
                 self.assertEqual(call_kwargs["model_size"], "medium")
                 self.assertEqual(call_kwargs["language"], "de")
                 self.assertEqual(call_kwargs["audio_device_index"], 2)
+                self.assertIsNone(call_kwargs["audio_device_name"])
+
+    @patch("vocalinux.main.check_dependencies")
+    @patch("vocalinux.ui.action_handler.ActionHandler")
+    @patch("vocalinux.speech_recognition.recognition_manager.SpeechRecognitionManager")
+    @patch("vocalinux.speech_recognition.recognition_manager.resolve_audio_device_selection")
+    @patch("vocalinux.text_injection.text_injector.TextInjector")
+    @patch("vocalinux.ui.tray_indicator.TrayIndicator")
+    @patch("vocalinux.main.logging")
+    @patch("vocalinux.ui.config_manager.ConfigManager")
+    @patch("vocalinux.ui.logging_manager.initialize_logging")
+    def test_main_repairs_saved_audio_device_at_startup(
+        self,
+        mock_init_logging,
+        mock_config_manager,
+        mock_logging,
+        mock_tray,
+        mock_text,
+        mock_resolve_audio_device,
+        mock_speech,
+        mock_action_handler,
+        mock_check_deps,
+    ):
+        """Startup should persist corrected audio device info before engine init."""
+        mock_check_deps.return_value = True
+        mock_resolve_audio_device.return_value = (14, "default")
+
+        mock_config_instance = MagicMock()
+        mock_config_instance.get_settings.return_value = {
+            "speech_recognition": {
+                "engine": "whisper_cpp",
+                "model_size": "large",
+                "language": "en-us",
+            },
+            "audio": {
+                "device_index": 19,
+                "device_name": "Avantalk Lingo",
+            },
+            "general": {"first_run": False},
+        }
+        mock_config_manager.return_value = mock_config_instance
+
+        mock_speech.return_value = MagicMock()
+        mock_text.return_value = MagicMock()
+        mock_tray.return_value = MagicMock()
+        mock_action_handler.return_value = MagicMock()
+
+        with patch("vocalinux.main.parse_arguments") as mock_parse:
+            mock_args = MagicMock()
+            mock_args.debug = False
+            mock_args.model = "small"
+            mock_args.engine = "vosk"
+            mock_args.language = "en-us"
+            mock_args.wayland = False
+            mock_args.start_minimized = False
+            mock_parse.return_value = mock_args
+
+            with patch("vocalinux.main.logger"):
+                main()
+
+        mock_resolve_audio_device.assert_called_once_with(19, "Avantalk Lingo")
+        mock_config_instance.set.assert_any_call("audio", "device_index", 14)
+        mock_config_instance.set.assert_any_call("audio", "device_name", "default")
+        mock_config_instance.save_settings.assert_called()
+
+        call_kwargs = mock_speech.call_args[1]
+        self.assertEqual(call_kwargs["audio_device_index"], 14)
+        self.assertEqual(call_kwargs["audio_device_name"], "default")
 
 
 class TestTextCallbackSpacing(unittest.TestCase):

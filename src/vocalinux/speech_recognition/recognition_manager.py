@@ -103,6 +103,125 @@ def get_audio_input_devices() -> list:
     return devices
 
 
+def _normalize_audio_device_name(name: Optional[str]) -> str:
+    """Normalize a device name for stable comparisons across UI labels and backends."""
+    if not name:
+        return ""
+
+    normalized = " ".join(str(name).strip().split())
+    if normalized.endswith(" (default)"):
+        normalized = normalized[: -len(" (default)")].rstrip()
+    return normalized.casefold()
+
+
+def _resolve_input_device(
+    audio, requested_index: Optional[int], requested_name: Optional[str] = None
+) -> tuple[Optional[int], Optional[str]]:
+    """
+    Resolve a saved device selection against the current PortAudio device list.
+
+    PortAudio device indices are not stable across reboots, hotplug events, or
+    backend changes. A saved index can later point at a different device, or at
+    an output-only stream such as a PulseAudio playback client. In those cases
+    we first try to recover by matching the saved device name, then fall back to
+    the system default input device instead of trying to record from an invalid
+    endpoint.
+
+    Args:
+        audio: PyAudio instance
+        requested_index: Saved/configured device index, or None for default
+        requested_name: Saved/configured device name, if known
+
+    Returns:
+        A tuple of ``(device_index, device_name)``. Both are ``None`` when the
+        system default input device should be used.
+    """
+    expected_name = _normalize_audio_device_name(requested_name)
+
+    if requested_index is None:
+        return None, None
+
+    try:
+        device_info = audio.get_device_info_by_index(requested_index)
+    except (IOError, OSError) as e:
+        logger.warning(
+            f"Configured audio device [{requested_index}] is no longer available: {e}. "
+            "Trying to recover by device name."
+        )
+    else:
+        current_name = device_info.get("name")
+        max_input_channels = int(device_info.get("maxInputChannels", 0) or 0)
+        if max_input_channels > 0 and (
+            not expected_name or _normalize_audio_device_name(current_name) == expected_name
+        ):
+            return requested_index, current_name
+
+        if max_input_channels <= 0:
+            logger.warning(
+                f"Configured audio device [{requested_index}] '{current_name}' "
+                "has no input channels. Trying to recover by device name."
+            )
+        elif expected_name:
+            logger.warning(
+                f"Configured audio device index [{requested_index}] now maps to '{current_name}' "
+                f"instead of saved device '{requested_name}'. Trying to recover by name."
+            )
+
+    if expected_name:
+        for i in range(audio.get_device_count()):
+            try:
+                info = audio.get_device_info_by_index(i)
+            except (IOError, OSError):
+                continue
+
+            if int(info.get("maxInputChannels", 0) or 0) <= 0:
+                continue
+
+            current_name = info.get("name")
+            if _normalize_audio_device_name(current_name) == expected_name:
+                logger.info(
+                    f"Recovered audio device '{current_name}' at index {i} "
+                    f"(saved index was {requested_index})"
+                )
+                return i, current_name
+
+        logger.warning(
+            f"Saved audio device '{requested_name}' is no longer available. "
+            "Falling back to system default input."
+        )
+
+    return None, None
+
+
+def resolve_audio_device_selection(
+    requested_index: Optional[int], requested_name: Optional[str] = None
+) -> tuple[Optional[int], Optional[str]]:
+    """
+    Resolve a saved audio-device selection against the current PortAudio state.
+
+    This is used by startup code to repair stale saved config before the first
+    recording attempt. If device probing is unavailable, the original selection
+    is preserved so callers can defer validation until record time.
+    """
+    normalized_name = _normalize_audio_device_name(requested_name) or None
+
+    if requested_index is None:
+        return None, None
+
+    try:
+        import pyaudio
+
+        audio = pyaudio.PyAudio()
+    except (ImportError, OSError) as e:
+        logger.debug(f"Could not resolve saved audio device at startup: {e}")
+        return requested_index, normalized_name
+
+    try:
+        return _resolve_input_device(audio, requested_index, normalized_name)
+    finally:
+        audio.terminate()
+
+
 def _get_supported_channels(audio, device_index: Optional[int] = None) -> int:
     """
     Detect the supported number of channels for the audio device.
@@ -293,26 +412,30 @@ def test_audio_input(device_index: int = None, duration: float = 1.0) -> dict:
 
         audio = pyaudio.PyAudio()
 
+        validated_device_index, validated_device_name = _resolve_input_device(
+            audio, device_index
+        )
+
         # Get device info
         try:
-            if device_index is not None:
-                info = audio.get_device_info_by_index(device_index)
+            if validated_device_index is not None:
+                info = audio.get_device_info_by_index(validated_device_index)
             else:
                 info = audio.get_default_input_device_info()
-                device_index = info.get("index")
-            result["device_name"] = info.get("name", "Unknown")
-            result["device_index"] = device_index
+                validated_device_index = info.get("index")
+            result["device_name"] = validated_device_name or info.get("name", "Unknown")
+            result["device_index"] = validated_device_index
         except (IOError, OSError) as e:
             result["error"] = f"Cannot get device info: {e}"
             audio.terminate()
             return result
 
         # Detect supported channel count first (some devices require stereo)
-        CHANNELS = _get_supported_channels(audio, device_index)
+        CHANNELS = _get_supported_channels(audio, validated_device_index)
         logger.info(f"Using {CHANNELS} channel(s) for audio test")
 
         # Detect supported sample rate for this device
-        RATE = _get_supported_sample_rate(audio, device_index, CHANNELS)
+        RATE = _get_supported_sample_rate(audio, validated_device_index, CHANNELS)
         result["sample_rate"] = RATE
 
         # Open stream
@@ -324,8 +447,8 @@ def test_audio_input(device_index: int = None, duration: float = 1.0) -> dict:
                 "input": True,
                 "frames_per_buffer": CHUNK,
             }
-            if device_index is not None:
-                stream_kwargs["input_device_index"] = device_index
+            if validated_device_index is not None:
+                stream_kwargs["input_device_index"] = validated_device_index
 
             stream = audio.open(**stream_kwargs)
         except (IOError, OSError) as e:
@@ -562,6 +685,7 @@ class SpeechRecognitionManager:
 
         # Audio device selection (None means use system default)
         self.audio_device_index = kwargs.get("audio_device_index", None)
+        self.audio_device_name = kwargs.get("audio_device_name", None)
 
         # Audio diagnostics tracking
         self._last_audio_level = 0.0
@@ -1490,16 +1614,24 @@ class SpeechRecognitionManager:
         except ValueError:
             pass
 
-    def set_audio_device(self, device_index: Optional[int]):
+    def set_audio_device(self, device_index: Optional[int], device_name: Optional[str] = None):
         """
         Set the audio input device to use.
 
         Args:
             device_index: The device index to use, or None for system default
+            device_name: The device name to use for recovering from index drift
         """
-        if device_index != self.audio_device_index:
-            logger.info(f"Audio device changed from {self.audio_device_index} to {device_index}")
+        normalized_name = _normalize_audio_device_name(device_name) or None
+        current_name = _normalize_audio_device_name(self.audio_device_name) or None
+
+        if device_index != self.audio_device_index or normalized_name != current_name:
+            logger.info(
+                f"Audio device changed from index={self.audio_device_index}, "
+                f"name={self.audio_device_name} to index={device_index}, name={device_name}"
+            )
             self.audio_device_index = device_index
+            self.audio_device_name = normalized_name
 
     def get_audio_device(self) -> Optional[int]:
         """Get the currently configured audio device index."""
@@ -1654,12 +1786,19 @@ class SpeechRecognitionManager:
                 except (IOError, OSError):
                     continue
 
+            validated_device_index, validated_device_name = _resolve_input_device(
+                audio, self.audio_device_index, self.audio_device_name
+            )
+            if validated_device_index != self.audio_device_index:
+                self.audio_device_index = validated_device_index
+            self.audio_device_name = validated_device_name
+
             # Detect supported channel count first (some devices require stereo)
-            CHANNELS = _get_supported_channels(audio, self.audio_device_index)
+            CHANNELS = _get_supported_channels(audio, validated_device_index)
             logger.info(f"Using {CHANNELS} channel(s) for recording")
 
             # Detect supported sample rate for the selected device
-            RATE = _get_supported_sample_rate(audio, self.audio_device_index, CHANNELS)
+            RATE = _get_supported_sample_rate(audio, validated_device_index, CHANNELS)
             self._capture_sample_rate = RATE
             logger.info(f"Using sample rate: {RATE}Hz")
 
@@ -1673,15 +1812,15 @@ class SpeechRecognitionManager:
             }
 
             # Use specified device if set, otherwise use system default
-            if self.audio_device_index is not None:
-                stream_kwargs["input_device_index"] = self.audio_device_index
+            if validated_device_index is not None:
+                stream_kwargs["input_device_index"] = validated_device_index
                 try:
-                    device_info = audio.get_device_info_by_index(self.audio_device_index)
+                    device_info = audio.get_device_info_by_index(validated_device_index)
                     logger.info(
-                        f"Using audio device [{self.audio_device_index}]: {device_info.get('name')}"
+                        f"Using audio device [{validated_device_index}]: {device_info.get('name')}"
                     )
                 except (IOError, OSError):
-                    logger.warning(f"Could not get info for device index {self.audio_device_index}")
+                    logger.warning(f"Could not get info for device index {validated_device_index}")
             else:
                 try:
                     default_device = audio.get_default_input_device_info()
@@ -2244,12 +2383,19 @@ class SpeechRecognitionManager:
             CHUNK = 1024
             FORMAT = pyaudio.paInt16
 
+            validated_device_index, validated_device_name = _resolve_input_device(
+                audio_instance, self.audio_device_index, self.audio_device_name
+            )
+            if validated_device_index != self.audio_device_index:
+                self.audio_device_index = validated_device_index
+            self.audio_device_name = validated_device_name
+
             # Detect supported channel count first (some devices require stereo)
-            CHANNELS = _get_supported_channels(audio_instance, self.audio_device_index)
+            CHANNELS = _get_supported_channels(audio_instance, validated_device_index)
             logger.debug(f"Reconnecting with {CHANNELS} channel(s)")
 
             # Detect supported sample rate for the device
-            RATE = _get_supported_sample_rate(audio_instance, self.audio_device_index, CHANNELS)
+            RATE = _get_supported_sample_rate(audio_instance, validated_device_index, CHANNELS)
             self._capture_sample_rate = RATE
             logger.debug(f"Reconnecting with sample rate: {RATE}Hz")
 
@@ -2262,8 +2408,8 @@ class SpeechRecognitionManager:
             }
 
             # Use specified device if set
-            if self.audio_device_index is not None:
-                stream_kwargs["input_device_index"] = self.audio_device_index
+            if validated_device_index is not None:
+                stream_kwargs["input_device_index"] = validated_device_index
 
             # Attempt to open new stream
             new_stream = audio_instance.open(**stream_kwargs)
